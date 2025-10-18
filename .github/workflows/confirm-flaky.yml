@@ -1,0 +1,36 @@
+name: Confirm Flaky Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  confirm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Java and Maven
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 11
+
+      - name: Clone target project
+        run: |
+          git clone https://github.com/swagger-api/swagger-core.git
+          cd swagger-core
+          git checkout 5186247f9c9703bd962f9df95289bb942a648398
+
+      - name: Build project
+        run: |
+          cd swagger-core/modules/swagger-jaxrs2
+          mvn -q -DskipTests clean install
+
+      - name: Run test normally (expected pass)
+        run: |
+          cd swagger-core/modules/swagger-jaxrs2
+          mvn -q -Dtest=io.swagger.v3.jaxrs2.annotations.encoding.EncodingTest#testGetOperationWithEncodingInRequestBody test
+
+      - name: Run test with NonDex (may fail)
+        run: |
+          cd swagger-core/modules/swagger-jaxrs2
+          mvn -q edu.illinois:nondex-maven-plugin:2.1.1:nondex \
+             -Dtest=io.swagger.v3.jaxrs2.annotations.encoding.EncodingTest#testGetOperationWithEncodingInRequestBody -DnondexRuns=50
