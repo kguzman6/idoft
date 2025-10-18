@@ -11,26 +11,60 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 11
+          java-version: 11   # if build complains, try 8
 
       - name: Clone target project
         run: |
           git clone https://github.com/swagger-api/swagger-core.git
           cd swagger-core
           git checkout 5186247f9c9703bd962f9df95289bb942a648398
+          git rev-parse HEAD
 
-      - name: Build project
+      - name: Build deps from repo root (skip tests)
+        working-directory: swagger-core
         run: |
-          cd swagger-core/modules/swagger-jaxrs2
-          mvn -q -DskipTests clean install
+          set -o pipefail
+          mvn -q -DskipTests -pl modules/swagger-jaxrs2 -am clean install || \
+          mvn -q -DskipTests -Drat.skip=true -Dlicense.skip=true -Dcheckstyle.skip \
+                 -pl modules/swagger-jaxrs2 -am clean install
 
       - name: Run test normally (expected pass)
+        id: unit
+        working-directory: swagger-core
         run: |
-          cd swagger-core/modules/swagger-jaxrs2
-          mvn -q -Dtest=io.swagger.v3.jaxrs2.annotations.encoding.EncodingTest#testGetOperationWithEncodingInRequestBody test
+          set -o pipefail
+          mvn -q -pl modules/swagger-jaxrs2 test \
+             -Dtest=io.swagger.v3.jaxrs2.annotations.encoding.EncodingTest#testGetOperationWithEncodingInRequestBody \
+             2>&1 | tee ../ci-build.log
 
       - name: Run test with NonDex (may fail)
+        id: nondex
+        if: ${{ steps.unit.outcome == 'success' }}
+        working-directory: swagger-core
+        continue-on-error: true
         run: |
-          cd swagger-core/modules/swagger-jaxrs2
-          mvn -q edu.illinois:nondex-maven-plugin:2.1.1:nondex \
-             -Dtest=io.swagger.v3.jaxrs2.annotations.encoding.EncodingTest#testGetOperationWithEncodingInRequestBody -DnondexRuns=50
+          set -o pipefail
+          mvn -q -pl modules/swagger-jaxrs2 \
+             edu.illinois:nondex-maven-plugin:2.1.1:nondex \
+             -Dtest=io.swagger.v3.jaxrs2.annotations.encoding.EncodingTest#testGetOperationWithEncodingInRequestBody \
+             -DnondexRuns=50 \
+             2>&1 | tee -a ../ci-build.log
+
+      - name: Upload ci-build.log
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-build.log
+          path: ci-build.log
+
+      - name: Evaluate outcomes
+        if: ${{ always() }}
+        run: |
+          echo "unit outcome:   ${{ steps.unit.outcome }}"
+          echo "nondex outcome: ${{ steps.nondex.outcome }}"
+          if [ "${{ steps.unit.outcome }}" = "success" ] && [ "${{ steps.nondex.outcome }}" = "failure" ]; then
+            echo "✅ Confirmed flaky."
+            exit 0
+          else
+            echo "❌ Not confirmed. Increase -DnondexRuns or try another test."
+            exit 1
+          fi
