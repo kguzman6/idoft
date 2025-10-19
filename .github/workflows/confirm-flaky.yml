@@ -1,54 +1,64 @@
-name: Confirm Flaky Test
+name: Confirm Flaky Test (inputs)
 
 on:
   workflow_dispatch:
+    inputs:
+      repo_url:   { description: 'Git repo URL', required: true, type: string }
+      sha:        { description: 'Commit SHA (optional)', required: false, type: string, default: '' }
+      module:     { description: 'Maven module path (use "." for root)', required: true, type: string }
+      fqtn:       { description: 'pkg.Class.method', required: true, type: string }
+      nondexRuns: { description: 'NonDex runs', required: true, type: string, default: '200' }
+      java:       { description: 'Java version (8/11/17)', required: true, type: string, default: '11' }
 
 jobs:
   confirm:
     runs-on: ubuntu-latest
     steps:
-      - name: Set up Java and Maven
+      - uses: actions/checkout@v4
+
+      - name: Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 8   # jBPM at this SHA is happiest on 8; try 11 if needed
+          java-version: ${{ inputs.java }}
 
-      - name: Clone target project
+      - name: Clone
         run: |
-          git clone https://github.com/kiegroup/jbpm.git
-          cd jbpm
-          git checkout f7e80e82b7670c09485ce83869a287ef51dcb59c
+          git clone "${{ inputs.repo_url }}" proj
+          cd proj
+          if [ -n "${{ inputs.sha }}" ]; then git checkout "${{ inputs.sha }}"; fi
           git rev-parse HEAD
 
-      - name: Build deps from repo root (skip tests)
-        working-directory: jbpm
+      - name: Build (skip tests)
+        working-directory: proj
         run: |
           set -o pipefail
-          mvn -q -DskipTests -pl jbpm-case-mgmt/jbpm-case-mgmt-impl -am clean install || \
-          mvn -q -DskipTests -Drat.skip=true -Dlicense.skip=true -Dcheckstyle.skip \
-                 -pl jbpm-case-mgmt/jbpm-case-mgmt-impl -am clean install
+          MOD="${{ inputs.module }}"
+          mvn -q -DskipTests -pl "$MOD" -am clean install || \
+          mvn -q -DskipTests -Drat.skip=true -Dlicense.skip=true -Dcheckstyle.skip -pl "$MOD" -am clean install
 
-      - name: Run test normally (expected pass)
+      - name: Run test (normal)
         id: unit
-        working-directory: jbpm
+        working-directory: proj
         run: |
           set -o pipefail
-          mvn -q -pl jbpm-case-mgmt/jbpm-case-mgmt-impl test \
-             -Dtest=org.jbpm.casemgmt.impl.CaseServiceImplTest#testStartEmptyCaseChangeOwner \
-             2>&1 | tee ../ci-build.log
+          FQTN="${{ inputs.fqtn }}"
+          CLASS="${FQTN%.*}"
+          METHOD="${FQTN##*.}"
+          mvn -q -pl "${{ inputs.module }}" test -Dtest="${CLASS}#${METHOD}" 2>&1 | tee ../ci-build.log
 
-      - name: Run test with NonDex (may fail)
+      - name: Run with NonDex
         id: nondex
         if: ${{ steps.unit.outcome == 'success' }}
-        working-directory: jbpm
+        working-directory: proj
         continue-on-error: true
         run: |
           set -o pipefail
-          mvn -q -pl jbpm-case-mgmt/jbpm-case-mgmt-impl \
-             edu.illinois:nondex-maven-plugin:2.1.1:nondex \
-             -Dtest=org.jbpm.casemgmt.impl.CaseServiceImplTest#testStartEmptyCaseChangeOwner \
-             -DnondexRuns=100 \
-             2>&1 | tee -a ../ci-build.log
+          FQTN="${{ inputs.fqtn }}"
+          CLASS="${FQTN%.*}"
+          METHOD="${FQTN##*.}"
+          mvn -q -pl "${{ inputs.module }}" edu.illinois:nondex-maven-plugin:2.1.1:nondex \
+             -Dtest="${CLASS}#${METHOD}" -DnondexRuns="${{ inputs.nondexRuns }}" 2>&1 | tee -a ../ci-build.log
 
       - name: Upload ci-build.log
         uses: actions/upload-artifact@v4
@@ -56,15 +66,15 @@ jobs:
           name: ci-build.log
           path: ci-build.log
 
-      - name: Evaluate outcomes
+      - name: Decide
         if: ${{ always() }}
         run: |
-          echo "unit outcome:   ${{ steps.unit.outcome }}"
-          echo "nondex outcome: ${{ steps.nondex.outcome }}"
+          echo "unit:   ${{ steps.unit.outcome }}"
+          echo "nondex: ${{ steps.nondex.outcome }}"
           if [ "${{ steps.unit.outcome }}" = "success" ] && [ "${{ steps.nondex.outcome }}" = "failure" ]; then
             echo "✅ Confirmed flaky."
             exit 0
           else
-            echo "❌ Not confirmed. Increase -DnondexRuns or try another test."
+            echo "❌ Not confirmed."
             exit 1
           fi
