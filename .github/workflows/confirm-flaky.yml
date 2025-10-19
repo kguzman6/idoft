@@ -11,43 +11,43 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 11   # if build complains, try 8
+          java-version: 8   # jBPM at this SHA is happiest on 8; try 11 if needed
 
       - name: Clone target project
         run: |
-          git clone https://github.com/swagger-api/swagger-core.git
-          cd swagger-core
-          git checkout 5186247f9c9703bd962f9df95289bb942a648398
+          git clone https://github.com/kiegroup/jbpm.git
+          cd jbpm
+          git checkout f7e80e82b7670c09485ce83869a287ef51dcb59c
           git rev-parse HEAD
 
       - name: Build deps from repo root (skip tests)
-        working-directory: swagger-core
+        working-directory: jbpm
         run: |
           set -o pipefail
-          mvn -q -DskipTests -pl modules/swagger-jaxrs2 -am clean install || \
+          mvn -q -DskipTests -pl jbpm-case-mgmt/jbpm-case-mgmt-impl -am clean install || \
           mvn -q -DskipTests -Drat.skip=true -Dlicense.skip=true -Dcheckstyle.skip \
-                 -pl modules/swagger-jaxrs2 -am clean install
+                 -pl jbpm-case-mgmt/jbpm-case-mgmt-impl -am clean install
 
       - name: Run test normally (expected pass)
         id: unit
-        working-directory: swagger-core
+        working-directory: jbpm
         run: |
           set -o pipefail
-          mvn -q -pl modules/swagger-jaxrs2 test \
-             -Dtest=io.swagger.v3.jaxrs2.annotations.encoding.EncodingTest#testGetOperationWithEncodingInRequestBody \
+          mvn -q -pl jbpm-case-mgmt/jbpm-case-mgmt-impl test \
+             -Dtest=org.jbpm.casemgmt.impl.CaseServiceImplTest#testStartEmptyCaseChangeOwner \
              2>&1 | tee ../ci-build.log
 
       - name: Run test with NonDex (may fail)
         id: nondex
         if: ${{ steps.unit.outcome == 'success' }}
-        working-directory: swagger-core
+        working-directory: jbpm
         continue-on-error: true
         run: |
           set -o pipefail
-          mvn -q -pl modules/swagger-jaxrs2 \
+          mvn -q -pl jbpm-case-mgmt/jbpm-case-mgmt-impl \
              edu.illinois:nondex-maven-plugin:2.1.1:nondex \
-             -Dtest=io.swagger.v3.jaxrs2.annotations.encoding.EncodingTest#testGetOperationWithEncodingInRequestBody \
-             -DnondexRuns=50 \
+             -Dtest=org.jbpm.casemgmt.impl.CaseServiceImplTest#testStartEmptyCaseChangeOwner \
+             -DnondexRuns=100 \
              2>&1 | tee -a ../ci-build.log
 
       - name: Upload ci-build.log
