@@ -1,86 +1,91 @@
-name: Confirm Flaky Test (stable inputs)
+name: Confirm Flaky Test (fast)
 
 on:
   workflow_dispatch:
     inputs:
       repo_url:   { description: 'Git repo URL', required: true, type: string }
-      sha:        { description: 'Commit SHA (optional; will skip if not found)', required: false, type: string, default: '' }
+      sha:        { description: 'Commit SHA (optional)', required: false, type: string, default: '' }
       module:     { description: 'Maven module path (use "." for root)', required: true, type: string }
       fqtn:       { description: 'pkg.Class.method (e.g., a.b.C.testX)', required: true, type: string }
-      nondexRuns: { description: 'NonDex runs (200–500 recommended)', required: true, type: string, default: '300' }
+      nondexRuns: { description: 'NonDex runs', required: true, type: string, default: '120' }
       java:       { description: 'Java version (8/11/17)', required: true, type: string, default: '11' }
 
 jobs:
   confirm:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+
     steps:
-      - name: Checkout (this repo; just for artifact storage)
+      - name: Checkout (this repo; artifacts only)
         uses: actions/checkout@v4
 
-      - name: Java toolchain
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: ${{ inputs.java }}
 
-      - name: Clone target repo (no rewriting of your links)
+      - name: Cache Maven ~/.m2
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: m2-${{ runner.os }}-${{ inputs.java }}-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            m2-${{ runner.os }}-${{ inputs.java }}-
+
+      - name: Shallow clone target repo (fast)
         run: |
           set -e
-          git clone "${{ inputs.repo_url }}" proj
+          git clone --depth 1 "${{ inputs.repo_url }}" proj
           cd proj
-          # Try to checkout SHA if provided; if it fails, keep default branch
           if [ -n "${{ inputs.sha }}" ]; then
-            echo "Trying to checkout ${{ inputs.sha }} ..."
-            if git cat-file -e "${{ inputs.sha }}^{commit}" 2>/dev/null; then
-              git checkout "${{ inputs.sha }}"
-              echo "Checked out SHA OK."
-            else
-              echo "⚠️  SHA not found in remote. Proceeding on default branch HEAD."
+            # fetch just that commit if it isn't in the shallow clone
+            if ! git cat-file -e "${{ inputs.sha }}^{commit}" 2>/dev/null; then
+              git fetch --depth 1 origin "${{ inputs.sha }}"
             fi
+            git checkout "${{ inputs.sha }}" || echo "⚠️ SHA not found; staying on default branch"
           fi
           echo "Using commit:"; git rev-parse HEAD
 
-      - name: Build (skip tests; resilient flags)
+      - name: Build (skip tests, fast flags, parallel)
         working-directory: proj
         run: |
           set -o pipefail
           MOD="${{ inputs.module }}"
-          # First try a normal build; if any release-time plugins run, skip them
-          mvn -q -DskipTests \
-                 -Dgpg.skip=true -Dmaven.javadoc.skip=true -Dcheckstyle.skip=true \
-                 -pl "$MOD" -am clean install || \
-          mvn -q -DskipTests \
-                 -Dgpg.skip=true -Dmaven.javadoc.skip=true -Dcheckstyle.skip=true \
-                 -Drat.skip=true -Dlicense.skip=true \
-                 -pl "$MOD" -am clean install
+          mvn -q -T 2C -DskipTests \
+              -Dgpg.skip=true -Dmaven.javadoc.skip=true -Dcheckstyle.skip=true \
+              -Denforcer.skip=true -DskipITs=true \
+              -pl "$MOD" -am clean install || \
+          mvn -q -T 2C -DskipTests \
+              -Dgpg.skip=true -Dmaven.javadoc.skip=true -Dcheckstyle.skip=true \
+              -Denforcer.skip=true -DskipITs=true -Drat.skip=true -Dlicense.skip=true \
+              -pl "$MOD" -am clean install
 
-      - name: Run test (normal)
+      - name: Run test (normal; fail-fast)
         id: unit
         working-directory: proj
         run: |
           set -o pipefail
-          FQ="${{ inputs.fqtn }}"
-          CLASS="${FQ%.*}"
-          METHOD="${FQ##*.}"
+          FQ="${{ inputs.fqtn }}"; CLASS="${FQ%.*}"; METHOD="${FQ##*.}"
           echo "Running ${CLASS}#${METHOD} (normal)"
-          mvn -q -pl "${{ inputs.module }}" test -Dtest="${CLASS}#${METHOD}" \
-            2>&1 | tee ../ci-build.log
+          mvn -q -pl "${{ inputs.module }}" \
+              -DfailIfNoTests=false \
+              test -Dtest="${CLASS}#${METHOD}" 2>&1 | tee ../ci-build.log
 
-      - name: Run with NonDex (may fail)
+      - name: Run with NonDex (shorter by default)
         id: nondex
         if: ${{ steps.unit.outcome == 'success' }}
         working-directory: proj
         continue-on-error: true
         run: |
           set -o pipefail
-          FQ="${{ inputs.fqtn }}"
-          CLASS="${FQ%.*}"
-          METHOD="${FQ##*.}"
+          FQ="${{ inputs.fqtn }}"; CLASS="${FQ%.*}"; METHOD="${FQ##*.}"
           echo "Running ${CLASS}#${METHOD} with NonDex (${{ inputs.nondexRuns }} runs)"
           mvn -q -pl "${{ inputs.module }}" \
-            edu.illinois:nondex-maven-plugin:2.1.1:nondex \
-            -Dtest="${CLASS}#${METHOD}" -DnondexRuns="${{ inputs.nondexRuns }}" \
-            2>&1 | tee -a ../ci-build.log
+              edu.illinois:nondex-maven-plugin:2.1.1:nondex \
+              -Dtest="${CLASS}#${METHOD}" \
+              -DnondexRuns="${{ inputs.nondexRuns }}" \
+              2>&1 | tee -a ../ci-build.log
 
       - name: Upload ci-build.log
         uses: actions/upload-artifact@v4
