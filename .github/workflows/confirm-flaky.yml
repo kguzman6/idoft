@@ -37,6 +37,7 @@ jobs:
           mvn -q -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true -Dcheckstyle.skip=true -pl "$MOD" -am clean install || \
           mvn -q -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true -Drat.skip=true -Dlicense.skip=true -Dcheckstyle.skip -pl "$MOD" -am clean install
 
+
       - name: Run test (normal)
         id: unit
         working-directory: proj
